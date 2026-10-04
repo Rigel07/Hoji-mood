@@ -1,0 +1,72 @@
+name: Build Hoji
+
+on:
+  push:
+    branches: [ main, master ]
+    tags: [ 'v*' ]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Preparar el proyecto (carpetas sueltas o .zip subido)
+        run: |
+          if [ -f build.gradle ] && [ -d src/main/java ]; then
+            PROJECT_DIR=.
+          else
+            ZIP=$(find . -maxdepth 2 -name '*.zip' -not -path './.git/*' | head -n 1)
+            if [ -z "$ZIP" ]; then
+              echo "ERROR: no encuentro build.gradle + src/main/java en el repositorio, ni ningun .zip del mod."
+              echo "Sube los archivos CON sus carpetas (src, build.gradle...) o sube el .zip del mod."
+              ls -la; exit 1
+            fi
+            echo "Descomprimiendo $ZIP en work/"
+            mkdir -p work && unzip -q -o "$ZIP" -d work
+            BUILD_FILE=$(find work -maxdepth 3 -name build.gradle | head -n 1)
+            if [ -z "$BUILD_FILE" ]; then echo "ERROR: el zip no contiene build.gradle"; exit 1; fi
+            PROJECT_DIR=$(dirname "$BUILD_FILE")
+          fi
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+          echo "Proyecto en: $PROJECT_DIR"
+          test -d "$PROJECT_DIR/src/main/java" || { echo "ERROR: falta $PROJECT_DIR/src/main/java"; exit 1; }
+          echo "Archivos .java: $(find "$PROJECT_DIR/src/main/java" -name '*.java' | wc -l)"
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.1.1
+
+      - name: Compilar el mod
+        run: gradle build --no-daemon --console=plain --stacktrace -p "$PROJECT_DIR"
+
+      - name: Verificar que el .jar tiene el mod dentro
+        run: |
+          ls -la "$PROJECT_DIR/build/libs"
+          JAR=$(ls "$PROJECT_DIR"/build/libs/*.jar | grep -v -- '-sources' | head -n 1)
+          echo "Revisando $JAR"
+          unzip -l "$JAR" | grep -q 'META-INF/mods.toml' || { echo "ERROR: el jar no contiene mods.toml"; exit 1; }
+          unzip -l "$JAR" | grep -q 'com/hoji/HojiMod.class' || { echo "ERROR: el jar no contiene clases compiladas"; exit 1; }
+          echo "OK: el jar contiene el mod"
+
+      - name: Subir el .jar como artefacto
+        uses: actions/upload-artifact@v4
+        with:
+          name: hoji
+          path: ${{ env.PROJECT_DIR }}/build/libs/*.jar
+
+      - name: Publicar release (solo con tags v*)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.PROJECT_DIR }}/build/libs/*.jar
